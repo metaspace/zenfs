@@ -107,8 +107,9 @@ class ZonedBlockDevice {
 
   Zone *GetIOZone(uint64_t offset);
 
-  Zone *AllocateZone(Env::WriteLifeTimeHint lifetime);
-  Zone *AllocateMetaZone();
+  IOStatus AllocateZone(std::shared_ptr<Zone *> out_zone,
+                        Env::WriteLifeTimeHint lifetime);
+  IOStatus AllocateMetaZone(std::shared_ptr<Zone *> out_meta_zone);
 
   uint64_t GetFreeSpace();
   uint64_t GetUsedSpace();
@@ -117,7 +118,7 @@ class ZonedBlockDevice {
   std::string GetFilename();
   uint32_t GetBlockSize();
 
-  void ResetUnusedIOZones();
+  Status ResetUnusedIOZones();
   void LogZoneStats();
   void LogZoneUsage();
 
@@ -140,6 +141,7 @@ class ZonedBlockDevice {
 
  private:
   std::string ErrorToString(int err);
+  inline IOStatus UnsetBusyAndLogError(Zone *zone);
 };
 
 }  // namespace ROCKSDB_NAMESPACE

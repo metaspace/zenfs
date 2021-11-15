@@ -87,7 +87,11 @@ class ZenMetaLog {
     read_pos_ = zone->start_;
   }
 
-  virtual ~ZenMetaLog() { assert(zone_->UnsetBusy()); }
+  virtual ~ZenMetaLog() {
+    // TODO: report async error status
+    auto ret = zone_->UnsetBusy();
+    assert(ret);
+  }
 
   IOStatus AddRecord(const Slice& slice);
   IOStatus ReadRecord(Slice* record, std::string* scratch);

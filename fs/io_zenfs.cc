@@ -359,7 +359,11 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size) {
   IOStatus s;
 
   if (!active_zone_) {
-    Zone* zone = zbd_->AllocateZone(lifetime_);
+    std::shared_ptr<Zone*> pp_zone(new Zone*);
+    IOStatus status = zbd_->AllocateZone(pp_zone, lifetime_);
+    if (!status.ok()) return status;
+
+    Zone* zone = *pp_zone;
     if (!zone) {
       return IOStatus::NoSpace("Zone allocation failure, no active zone\n");
     }
@@ -378,7 +382,11 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size) {
         this->zbd_->NotifyIOZoneClosed();
       }
 
-      Zone* zone = zbd_->AllocateZone(lifetime_);
+      std::shared_ptr<Zone*> pp_zone(new Zone*);
+      status = zbd_->AllocateZone(pp_zone, lifetime_);
+      if (!status.ok()) return status;
+
+      Zone* zone = *pp_zone;
       if (!zone) {
         return IOStatus::NoSpace(
             "Zone allocation failure, current zone full\n");
@@ -410,8 +418,12 @@ IOStatus ZoneFile::SetWriteLifeTimeHint(Env::WriteLifeTimeHint lifetime) {
 }
 
 void ZoneFile::ReleaseActiveZone() {
-  assert(this->active_zone_ != nullptr);
-  assert(this->active_zone_->UnsetBusy());
+  if (this->active_zone_ != nullptr) {
+    auto ret = this->active_zone_->UnsetBusy();
+    assert(ret);
+  } else {
+    assert(false);
+  }
   this->active_zone_ = nullptr;
 }
 

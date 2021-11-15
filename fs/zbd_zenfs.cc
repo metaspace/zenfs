@@ -178,6 +178,21 @@ ZonedBlockDevice::ZonedBlockDevice(std::string bdevname,
   Info(logger_, "New Zoned Block Device: %s", filename_.c_str());
 };
 
+inline IOStatus ZonedBlockDevice::UnsetBusyAndLogError(Zone *zone) {
+  if (!zone) {
+    assert(false);
+    return IOStatus::InvalidArgument("The provided zone is a nullptr");
+  }
+
+  if (!zone->UnsetBusy()) {
+    assert(false);
+    Error(logger_, "Failed to unset busy flag of zone %lu", zone->GetZoneNr());
+    return IOStatus::Corruption("Failed to unset busy flag of zone " +
+                                std::to_string(zone->GetZoneNr()));
+  }
+
+  return IOStatus::OK();
+}
 std::string ZonedBlockDevice::ErrorToString(int err) {
   char *err_str = strerror(err);
   if (err_str != nullptr) return std::string(err_str);
@@ -310,7 +325,11 @@ IOStatus ZonedBlockDevice::Open(bool readonly, bool exclusive) {
     if (zbd_zone_type(z) == ZBD_ZONE_TYPE_SWR) {
       if (!zbd_zone_offline(z)) {
         Zone *newZone = new Zone(this, z);
-        assert(newZone->SetBusy());
+        if (!newZone->SetBusy()) {
+          assert(false);
+          return IOStatus::Corruption("Failed to set busy flag of zone " +
+                                      std::to_string(newZone->GetZoneNr()));
+        }
         io_zones.push_back(newZone);
         if (zbd_zone_imp_open(z) || zbd_zone_exp_open(z) ||
             zbd_zone_closed(z)) {
@@ -321,7 +340,8 @@ IOStatus ZonedBlockDevice::Open(bool readonly, bool exclusive) {
             }
           }
         }
-        assert(newZone->UnsetBusy());
+        IOStatus status = UnsetBusyAndLogError(newZone);
+        if (!status.ok()) return status;
       }
     }
   }
@@ -442,24 +462,31 @@ unsigned int GetLifeTimeDiff(Env::WriteLifeTimeHint zone_lifetime,
   return LIFETIME_DIFF_NOT_GOOD;
 }
 
-Zone *ZonedBlockDevice::AllocateMetaZone() {
+IOStatus ZonedBlockDevice::AllocateMetaZone(
+    std::shared_ptr<Zone *> out_meta_zone) {
+  assert(out_meta_zone);
+  *out_meta_zone = nullptr;
   for (const auto z : meta_zones) {
     /* If the zone is not used, reset and use it */
     if (z->SetBusy()) {
       if (!z->IsUsed()) {
         if (!z->IsEmpty() && !z->Reset().ok()) {
           Warn(logger_, "Failed resetting zone!");
-          assert(z->UnsetBusy());
+          IOStatus status = UnsetBusyAndLogError(z);
+          if (!status.ok()) return status;
           continue;
         }
-        return z;
+        *out_meta_zone = z;
+        return IOStatus::OK();
       }
     }
   }
-  return nullptr;
+  assert(true);
+  Error(logger_, "Out of metadata zones, we should go to read only now.");
+  return IOStatus::NoSpace("Out of metadata zones");
 }
 
-void ZonedBlockDevice::ResetUnusedIOZones() {
+Status ZonedBlockDevice::ResetUnusedIOZones() {
   const std::lock_guard<std::mutex> lock(zone_resources_mtx_);
   /* Reset any unused zones */
   for (const auto z : io_zones) {
@@ -468,12 +495,17 @@ void ZonedBlockDevice::ResetUnusedIOZones() {
         if (!z->IsFull()) active_io_zones_--;
         if (!z->Reset().ok()) Warn(logger_, "Failed reseting zone");
       }
-      assert(z->UnsetBusy());
+      IOStatus status = UnsetBusyAndLogError(z);
+      if (!status.ok()) return status;
     }
   }
+  return Status::OK();
 }
 
-Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
+IOStatus ZonedBlockDevice::AllocateZone(std::shared_ptr<Zone *> out_zone,
+                                        Env::WriteLifeTimeHint file_lifetime) {
+  assert(out_zone);
+  *out_zone = nullptr;
   Zone *allocated_zone = nullptr;
   Zone *finish_victim = nullptr;
   unsigned int best_diff = LIFETIME_DIFF_NOT_GOOD;
@@ -498,7 +530,8 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
     }
 
     if (z->IsEmpty() || (z->IsFull() && z->IsUsed())) {
-      assert(z->UnsetBusy());
+      IOStatus status = UnsetBusyAndLogError(z);
+      if (!status.ok()) return status;
       continue;
     }
 
@@ -509,7 +542,8 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
         Debug(logger_, "Failed resetting zone !");
       }
 
-      assert(z->UnsetBusy());
+      IOStatus status = UnsetBusyAndLogError(z);
+      if (!status.ok()) return status;
       continue;
     }
 
@@ -527,13 +561,16 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
       if (finish_victim == nullptr) {
         finish_victim = z;
       } else if (finish_victim->capacity_ > z->capacity_) {
-        assert(finish_victim->UnsetBusy());
+        IOStatus status = UnsetBusyAndLogError(finish_victim);
+        if (!status.ok()) return status;
         finish_victim = z;
       } else {
-        assert(z->UnsetBusy());
+        IOStatus status = UnsetBusyAndLogError(z);
+        if (!status.ok()) return status;
       }
     } else {
-      assert(z->UnsetBusy());
+      IOStatus status = UnsetBusyAndLogError(z);
+      if (!status.ok()) return status;
     }
   }
 
@@ -546,15 +583,18 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
         unsigned int diff = GetLifeTimeDiff(z->lifetime_, file_lifetime);
         if (diff <= best_diff) {
           if (allocated_zone != nullptr) {
-            assert(allocated_zone->UnsetBusy());
+            IOStatus status = UnsetBusyAndLogError(allocated_zone);
+            if (!status.ok()) return status;
           }
           allocated_zone = z;
           best_diff = diff;
         } else {
-          assert(z->UnsetBusy());
+          IOStatus status = UnsetBusyAndLogError(z);
+          if (!status.ok()) return status;
         }
       } else {
-        assert(z->UnsetBusy());
+        IOStatus status = UnsetBusyAndLogError(z);
+        if (!status.ok()) return status;
       }
     }
   }
@@ -581,14 +621,16 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
           if (z->IsEmpty()) {
             z->lifetime_ = file_lifetime;
             if (allocated_zone != nullptr) {
-              assert(allocated_zone->UnsetBusy());
+              IOStatus status = UnsetBusyAndLogError(allocated_zone);
+              if (!status.ok()) return status;
             }
             allocated_zone = z;
             active_io_zones_++;
             new_zone = 1;
             break;
           } else {
-            assert(z->UnsetBusy());
+            IOStatus status = UnsetBusyAndLogError(z);
+            if (!status.ok()) return status;
           }
         }
       }
@@ -596,7 +638,8 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
   }
 
   if (finish_victim != nullptr) {
-    assert(finish_victim->UnsetBusy());
+    IOStatus status = UnsetBusyAndLogError(finish_victim);
+    if (!status.ok()) return status;
     finish_victim = nullptr;
   }
 
@@ -611,8 +654,8 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
 
   io_zones_mtx.unlock();
   LogZoneStats();
-
-  return allocated_zone;
+  *out_zone = allocated_zone;
+  return IOStatus::OK();
 }
 
 std::string ZonedBlockDevice::GetFilename() { return filename_; }

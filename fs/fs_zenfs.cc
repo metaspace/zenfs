@@ -278,10 +278,13 @@ IOStatus ZenFS::WriteEndRecord(ZenMetaLog* meta_log) {
 /* Assumes the files_mtx_ is held */
 IOStatus ZenFS::RollMetaZoneLocked() {
   std::unique_ptr<ZenMetaLog> new_meta_log, old_meta_log;
-  Zone* new_meta_zone;
+  std::shared_ptr<Zone*> pp_meta_zone(new Zone*);
   IOStatus s;
 
-  new_meta_zone = zbd_->AllocateMetaZone();
+  IOStatus status = zbd_->AllocateMetaZone(pp_meta_zone);
+  if (!status.ok()) return status;
+
+  Zone* new_meta_zone = *pp_meta_zone;
   if (!new_meta_zone) {
     assert(false);  // TMP
     Error(logger_, "Out of metadata zones, we should go to read only now.");
@@ -875,7 +878,13 @@ Status ZenFS::Mount(bool readonly) {
     std::string scratch;
     Slice super_record;
 
-    assert(z->SetBusy());
+    if (!z->SetBusy()) {
+      assert(false);
+      return Status::Aborted("Could not aquire busy flag of zone" +
+                             std::to_string(z->GetZoneNr()));
+    }
+
+    // log takes the ownership of z's busy flag.
     log.reset(new ZenMetaLog(zbd_, z));
 
     if (!log->ReadRecord(&super_record, &scratch).ok()) continue;
@@ -981,7 +990,8 @@ Status ZenFS::Mount(bool readonly) {
 
   if (!readonly) {
     Info(logger_, "Resetting unused IO Zones..");
-    zbd_->ResetUnusedIOZones();
+    Status status = zbd_->ResetUnusedIOZones();
+    if (!status.ok()) return status;
     Info(logger_, "  Done");
   }
 
@@ -1002,18 +1012,29 @@ Status ZenFS::MkFS(std::string aux_fs_path, uint32_t finish_threshold) {
   }
 
   ClearFiles();
-  zbd_->ResetUnusedIOZones();
+  Status status = zbd_->ResetUnusedIOZones();
+  if (!status.ok()) return status;
 
   for (const auto mz : metazones) {
-    assert(mz->SetBusy());
+    if (!mz->SetBusy()) {
+      assert(false);
+      return Status::Aborted("Could not aquire busy flag of zone " +
+                             std::to_string(mz->GetZoneNr()));
+    }
+
     if (mz->Reset().ok()) {
-      if (!meta_zone) {
-        meta_zone = mz;
-      } else {
-        assert(mz->UnsetBusy());
-      }
+      if (!meta_zone) meta_zone = mz;
     } else {
       Warn(logger_, "Failed to reset meta zone\n");
+    }
+
+    if (meta_zone != mz) {
+      // for meta_zone == mz the ownership of mz's busy flag is passed to log.
+      if (!mz->UnsetBusy()) {
+        assert(false);
+        return Status::Aborted("Could not unset busy flag of zone " +
+                               std::to_string(mz->GetZoneNr()));
+      }
     }
   }
 
