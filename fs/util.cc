@@ -161,4 +161,18 @@ Status zenfs_mkfs(std::filesystem::path const &zbd_path,
   return zenfs_create(zbd_path, aux_path, finish_threshold);
 }
 
+bool status_is_ok(Status &status) {
+  return status.ok();
+}
+
+bool iostatus_is_ok(IOStatus &status) {
+  return status.ok();
+}
+
+std::unique_ptr<ZenFS> construct_zenfs(std::unique_ptr<ZonedBlockDevice> zbd,
+                                        std::shared_ptr<FileSystem> aux_fs,
+                                        std::shared_ptr<Logger> logger) {
+  return std::make_unique<ZenFS>(std::move(zbd), aux_fs, logger);
+}
+
 }  // namespace ROCKSDB_NAMESPACE
